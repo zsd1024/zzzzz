@@ -37,8 +37,11 @@ class Dataset:
             return ()
         with open(file_path, "r") as f:
             lines = f.readlines()
+
         tuples = np.zeros((len(lines), self.max_arity + 1))
         for i, line in enumerate(lines):
+            if len(line.strip().split("\t")) > 7:
+                continue
             tuples[i] = self.tuple2ids(line.strip().split("\t"))
         return tuples
 
@@ -50,6 +53,8 @@ class Dataset:
             lines = f.readlines()
         tuples = np.zeros((len(lines),  self.max_arity + 1))
         for i, line in enumerate(lines):
+            if len(line.strip().split("\t")) > 7:
+                continue
             splitted = line.strip().split("\t")[1:]
             tuples[i] = self.tuple2ids(splitted)
         return tuples
@@ -97,6 +102,7 @@ class Dataset:
             self.batch_index = 0
         batch = np.append(batch, np.zeros((len(batch), 1)), axis=1).astype("int") #appending the +1 label
         batch = np.append(batch, np.zeros((len(batch), 1)), axis=1).astype("int") #appending the 0 arity
+        # print(batch.shape)
         return batch
 
     def next_batch(self, batch_size, neg_ratio, device):
@@ -132,7 +138,7 @@ class Dataset:
     def neg_each(self, arr, arity, nr):
         arr[0,-2] = 1
         for a in range(arity):
-            arr[a* nr + 1:(a + 1) * nr + 1, a + 1] = np.random.randint(low=1, high=self.num_ent(), size=nr)
+            arr[a * nr + 1:(a + 1) * nr + 1, a + 1] = np.random.randint(low=1, high=self.num_ent(), size=nr)
         return arr
 
     def was_last_batch(self):

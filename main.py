@@ -15,6 +15,9 @@ import math
 DEFAULT_SAVE_DIR = 'output'
 DEFAULT_MAX_ARITY = 6
 
+
+
+# dsd
 class Experiment:
     def __init__(self, args):
         self.model_name = args.model
@@ -27,14 +30,16 @@ class Experiment:
         self.test = args.test
         self.output_dir = args.output_dir
         self.restartable = args.restartable
-        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        # Load the dataset
+        self.dataset = Dataset(args.dataset, DEFAULT_MAX_ARITY)
+        # self.device = torch.device('cpu')
+        self.device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+        print(self.device)
         self.kwargs = {"in_channels":args.in_channels,"out_channels":args.out_channels, "filt_h":args.filt_h, "filt_w":args.filt_w,
-                       "hidden_drop":args.hidden_drop, "stride":args.stride, "input_drop":args.input_drop}
+                       "hidden_drop":args.hidden_drop, "stride":args.stride, "input_drop":args.input_drop, "ent_num":self.dataset.num_ent()}
         self.hyperpars = {"model":args.model,"lr":args.lr,"emb_dim":args.emb_dim,"out_channels":args.out_channels,
                           "filt_w":args.filt_w,"nr":args.nr,"stride":args.stride, "hidden_drop":args.hidden_drop, "input_drop":args.input_drop}
 
-        # Load the dataset
-        self.dataset = Dataset(args.dataset, DEFAULT_MAX_ARITY)
 
         self.num_iterations = args.num_iterations
         # Create an output dir unless one is given
@@ -70,8 +75,11 @@ class Experiment:
         """
         Instantiate a model object given the model name
         """
+        hyperedge, edge_index, edge_type = self.get_input()
         model = None
-        if(model_name == "MDistMult"):
+        if(model_name == "MPNN"):
+            model = MPNN(hyperedge, edge_index, edge_type, self.device, self.dataset, self.emb_dim, **self.kwargs).to(self.device)
+        elif(model_name == "MDistMult"):
             model = MDistMult(self.dataset, self.emb_dim, **self.kwargs).to(self.device)
         elif(model_name == "MCP"):
             model = MCP(self.dataset, self.emb_dim, **self.kwargs).to(self.device)
@@ -84,7 +92,6 @@ class Experiment:
         else:
             raise Exception("!!!! No mode called {} found !!!!".format(self.model_name))
         return model
-
 
     def load_last_saved_model(self, output_dir):
         """
@@ -111,10 +118,13 @@ class Experiment:
             if len(model_list_sorted) > 0:
                 # Pick the most recent model
                 self.pretrained = os.path.join(self.output_dir, model_list_sorted[-1])
+                print
                 # Construct the name of the optimizer file based on the pretrained model path
                 opt_path = os.path.join(os.path.dirname(self.pretrained), os.path.basename(self.pretrained).replace('model','opt'))
                 if os.path.exists(opt_path):
+                    # self.model.load_state_dict(torch.load(self.pretrained, map_location={'cuda:1':'cuda:3'}))
                     self.model.load_state_dict(torch.load(self.pretrained))
+                    # self.opt.load_state_dict(torch.load(opt_path, map_location={'cuda:1':'cuda:3'}))
                     self.opt.load_state_dict(torch.load(opt_path))
                     model_found = True
 
@@ -134,7 +144,6 @@ class Experiment:
             # Initilize the model
             self.model.init()
 
-
     def load_model(self):
         """ If a pretrained model is provided, then it will be loaded. """
         """ If the output_dir contains a (half-)trained model, then it will be loaded """
@@ -142,9 +151,11 @@ class Experiment:
 
         print("Initializing the model ...")
         self.model = self.get_model_from_name(self.model_name)
-
+        print(self.model)
+        # self.model.init()
         # Load the pretrained model
         self.opt = torch.optim.Adagrad(self.model.parameters(), lr=self.learning_rate)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.opt, step_size=50, gamma=0.95)
 
         if self.pretrained is not None:
             print("Loading the pretrained model at {} for testing".format(self.pretrained))
@@ -175,6 +186,31 @@ class Experiment:
             # Save the result of the tests
             self.save_model(self.model.cur_itr, "test")
 
+    # add
+    def get_input(self):
+        num = self.dataset.num_ent()
+
+        data = self.dataset.data['train']
+        hyperedge = data.astype(np.int32)
+        # print(hyperedge)
+
+        adj = []
+        for i, edge in enumerate(hyperedge):
+            for j, entity in enumerate(edge[1:]):
+                if entity != 0:
+                    adj.append([entity, i, j + num])
+        adj = np.array(adj)
+        # print(adj)
+
+        sub = adj[:, 0]
+        edge = adj[:, 1]
+        pos = adj[:, 2]
+        edge_index = np.stack((sub, pos), axis=0)
+        pos_type = edge
+        # print(edge_index)
+        # print(pos_type)
+
+        return hyperedge, edge_index, pos_type
 
     def train_and_eval(self):
         # If the number of iterations is the same as the current iteration, exit.
@@ -187,7 +223,8 @@ class Experiment:
 
         print("Training the {} model...".format(self.model_name))
         print("Number of training data points: {}".format(len(self.dataset.data["train"])))
-
+        for i in range(10):
+            print("---------------------------------")
 
         loss_layer = torch.nn.CrossEntropyLoss()
         print("Starting training at iteration ... {}".format(self.model.cur_itr.data))
@@ -196,32 +233,47 @@ class Experiment:
             self.model.train()
             self.model.cur_itr.data += 1
             losses = 0
+
             while not last_batch:
                 r, e1, e2, e3, e4, e5, e6, targets, ms, bs = self.dataset.next_batch(self.batch_size, neg_ratio=self.neg_ratio, device=self.device)
+
                 last_batch = self.dataset.was_last_batch()
+
+
                 self.opt.zero_grad()
                 number_of_positive = len(np.where(targets > 0)[0])
-                if(self.model_name == "HypE"):
+                if(self.model_name == "MPNN"):
+                    predictions = self.model.forward(r, e1, e2, e3, e4, e5, e6, ms, bs)
+                elif(self.model_name == "HypE"):
                     predictions = self.model.forward(r, e1, e2, e3, e4, e5, e6, ms, bs)
                 elif(self.model_name == "MTransH"):
                     predictions = self.model.forward(r, e1, e2, e3, e4, e5, e6, ms)
                 else:
                     predictions = self.model.forward(r, e1, e2, e3, e4, e5, e6)
+                # print(targets.shape, predictions.shape)
                 predictions = self.padd_and_decompose(targets, predictions, self.neg_ratio*self.max_arity)
                 targets = torch.zeros(number_of_positive).long().to(self.device)
                 loss = loss_layer(predictions, targets)
+
                 loss.backward()
+
                 self.opt.step()
+                # for name, parms in self.model.named_parameters():
+                #     print('-->name:', name, '-->data', parms, '-->grad_requirs:', parms.requires_grad, ' -->grad_value:', parms.grad)
+
                 losses += loss.item()
 
             print("Iteration#: {}, loss: {}".format(it, losses))
 
+            self.scheduler.step()
+
             # Evaluate the model every 100th iteration or if it is the last iteration
-            if (it % 100 == 0) or (it == self.num_iterations):
+            if (it % 100 == 0) and it != 0:
+            # if (it % 200 == 0):
                 self.model.eval()
                 with torch.no_grad():
                     print("validation:")
-                    tester = Tester(self.dataset, self.model, "valid", self.model_name)
+                    tester = Tester(self.dataset, self.model, "valid", self.model_name, self.device)
                     measure_valid, _ = tester.test()
                     mrr = measure_valid.mrr["fil"]
                     # This is the best model we have so far if
@@ -236,13 +288,13 @@ class Experiment:
                     self.save_model(it, "valid", is_best_model=is_best_model)
 
 
-        #if self.best_model is None:
-        #    self.best_model = self.model
+        if self.best_model is None:
+           self.best_model = self.model
 
         self.best_model.eval()
         with torch.no_grad():
             print("testing best model at iteration {} .... ".format(self.best_model.best_itr))
-            tester = Tester(self.dataset, self.best_model, "test", self.model_name)
+            tester = Tester(self.dataset, self.best_model, "test", self.model_name, self.device)
             self.measure, self.measure_by_arity = tester.test(self.test_by_arity)
 
         # Save the model at checkpoint
@@ -263,7 +315,6 @@ class Experiment:
             os.makedirs(output_dir)
             print("Created output directory {}".format(output_dir))
         return output_dir
-
 
     def save_model(self, itr=0, test_or_valid='test', is_best_model=False):
             """
@@ -298,7 +349,6 @@ class Experiment:
                 with open(os.path.join(self.output_dir, measure_by_arity_name), 'w') as f:
                         json.dump(H, f, indent=4, sort_keys=True)
 
-
     def save_hparams(self, args):
         """
         Save the hyperparameters of the model as a json file in the output_dir if train time.
@@ -315,20 +365,20 @@ class Experiment:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('-model', type=str, default="HSimplE")
-    parser.add_argument('-dataset', type=str, default="JF17K")
-    parser.add_argument('-lr', type=float, default=0.01)
+    parser.add_argument('-model', type=str, default="MPNN")
+    parser.add_argument('-dataset', type=str, default="JF17K")  # JF17K
+    parser.add_argument('-lr', type=float, default=0.05)  # default 0.1 0.05
     parser.add_argument('-nr', type=int, default=10)
     parser.add_argument('-out_channels', type=int, default=6)
     parser.add_argument('-in_channels', type=int, default=1)
     parser.add_argument('-filt_w', type=int, default=1)
     parser.add_argument('-filt_h', type=int, default=1)
-    parser.add_argument('-emb_dim', type=int, default=200)
+    parser.add_argument('-emb_dim', type=int, default=100)  # 100 200
     parser.add_argument('-hidden_drop', type=float, default=0.2)
     parser.add_argument('-input_drop', type=float, default=0.2)
     parser.add_argument('-stride', type=int, default=2)
-    parser.add_argument('-num_iterations', type=int, default=1000)
-    parser.add_argument('-batch_size', type=int, default=128)
+    parser.add_argument('-num_iterations', type=int, default=100)
+    parser.add_argument('-batch_size', type=int, default=512)   # default 61911
     parser.add_argument("-test", action="store_true", help="If -test is set, then you must specify a -pretrained model. "
                         + "This will perform testing on the pretrained model and save the output in -output_dir")
     parser.add_argument("-no_test_by_arity", action="store_true", help="If set, then validation will be performed by arity.")
@@ -339,6 +389,12 @@ if __name__ == '__main__':
 
     if args.restartable and (args.output_dir is None):
             parser.error("-restarable requires -output_dir.")
+
+    print('--------args----------')
+    for k in list(vars(args).keys()):
+        print('%s: %s' % (k, vars(args)[k]))
+    print('--------args----------\n')
+
 
     experiment = Experiment(args)
 

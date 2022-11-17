@@ -1,3 +1,4 @@
+
 class Measure:
     def __init__(self):
         self.hit1  = {"raw": 0.0, "fil": 0.0}

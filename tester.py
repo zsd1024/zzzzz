@@ -6,8 +6,9 @@ from os import listdir
 from os.path import isfile, join
 
 class Tester:
-    def __init__(self, dataset, model, valid_or_test, model_name):
-        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    def __init__(self, dataset, model, valid_or_test, model_name, device):
+        # self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        self.device = device
         self.model = model
         self.model.eval()
         self.dataset = dataset
@@ -80,7 +81,7 @@ class Tester:
 
         else:
             # Evaluate the test data for arity cur_arity
-            current_measure, normalizer =  self.eval_dataset(self.dataset.data[self.valid_or_test])
+            current_measure, normalizer = self.eval_dataset(self.dataset.data[self.valid_or_test])
             self.measure = current_measure
 
         # If no samples were evaluated, exit with an error
@@ -123,7 +124,22 @@ class Tester:
                 queries = self.create_queries(fact, j)
                 for raw_or_fil in settings:
                     r, e1, e2, e3, e4, e5, e6 = self.add_fact_and_shred(fact, queries, raw_or_fil)
-                    if (self.model_name == "HypE"):
+
+                    # add
+                    if (self.model_name == "MPNN"):
+                        ms = np.zeros((len(r),6))
+                        bs = np.ones((len(r), 6))
+
+                        ms[:, 0:arity] = 1
+                        bs[:, 0:arity] = 0
+
+                        ms = torch.tensor(ms).float().to(self.device)
+                        bs = torch.tensor(bs).float().to(self.device)
+                        sim_scores = self.model.test(r, e1, e2, e3, e4, e5, e6, ms, bs).cpu().data.numpy()
+
+                    # add
+
+                    elif (self.model_name == "HypE"):
                         ms = np.zeros((len(r),6))
                         bs = np.ones((len(r), 6))
 
